@@ -1,14 +1,17 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -32,43 +35,78 @@ func init() {
 	selectRegex = regexp.MustCompile(RegexSelectInput)
 }
 
+func worker(id int, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	if err := solveTest(); err != nil {
+		log.Fatalf("error while solving test with worker: %d", id)
+	}
+
+	fmt.Printf("worker: %d, test completed!\n", id)
+}
+
 func main() {
+	workersCount := 1
+	var err error
+	if len(os.Args) > 1 {
+		workersCount, err = strconv.Atoi(os.Args[1])
+		if err != nil {
+			log.Fatalf("error while parsing run args: %s", err.Error())
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < workersCount; i++ {
+		wg.Add(1)
+		go worker(i, &wg)
+	}
+
+	wg.Wait()
+}
+
+func solveTest() error {
 	r, err := http.Get(TestBaseURL)
 	if err != nil {
-		log.Fatalf("error while visiting test home page: %s", err.Error())
+		return errors.New(fmt.Sprintf("error while visiting test home page: %s", err.Error()))
 	}
 
 	SID := r.Cookies()[0]
-	solveAllQuestions(SID)
-}
 
-func solveAllQuestions(SID *http.Cookie) {
 	index := 1
 	for true {
-		isTestCompleted := solveQuestion(index, SID)
+		questionAnswers, err := solveQuestionByIndex(index, SID)
+		if err != nil {
+			return err
+		}
+		isTestCompleted, err := postAnswerForQuestionByIndex(index, SID, questionAnswers)
+		if err != nil {
+			return err
+		}
 		if isTestCompleted {
 			break
 		}
 		index++
 	}
+
+	return nil
 }
 
-func solveQuestion(index int, SID *http.Cookie) bool {
+func solveQuestionByIndex(index int, SID *http.Cookie) (url.Values, error) {
 	req, err := http.NewRequest("GET", TestBaseURL+"/question/"+strconv.Itoa(index), nil)
 	if err != nil {
-		log.Fatalf("got error: %s", err.Error())
+		return nil, errors.New(fmt.Sprintf("error while creating new get request: %s", err.Error()))
 	}
 	req.AddCookie(SID)
 
 	res, err := client.Do(req)
 	if err != nil {
-		log.Fatalf("error occured. Error is: %s", err.Error())
+		return nil, errors.New(fmt.Sprintf("error while doing get request: %s", err.Error()))
 	}
 	defer res.Body.Close()
 
 	htmlBytes, err := io.ReadAll(res.Body)
 	if err != nil {
-		log.Fatalf("error while reading response body: %s", err.Error())
+		return nil, errors.New(fmt.Sprintf("error while reading response body: %s", err.Error()))
 	}
 	html := string(htmlBytes)
 
@@ -77,11 +115,14 @@ func solveQuestion(index int, SID *http.Cookie) bool {
 	selectResult := selectRegex.FindAllStringSubmatch(html, -1)
 
 	postBody := make(map[string]string)
+
+	// solving text inputs
 	if len(textResult) > 0 {
 		for _, v := range textResult {
 			postBody[v[1]] = "test"
 		}
 	}
+	// solving radio inputs
 	if len(radioResult) > 0 {
 		currentRadioGroupName := radioResult[0][2]
 		currentRadioGroupMaxLengthValue := radioResult[0][3]
@@ -101,6 +142,7 @@ func solveQuestion(index int, SID *http.Cookie) bool {
 		}
 		postBody[currentRadioGroupName] = currentRadioGroupMaxLengthValue
 	}
+	// solving select inputs
 	if len(selectResult) > 0 {
 		currentSelectGroupName := selectResult[0][1]
 		currentSelectGroupMaxLengthValue := selectResult[1][2]
@@ -121,35 +163,33 @@ func solveQuestion(index int, SID *http.Cookie) bool {
 		postBody[currentSelectGroupName] = currentSelectGroupMaxLengthValue
 	}
 
-	dataToSend := url.Values{}
+	resultData := url.Values{}
 	for k, v := range postBody {
-		dataToSend.Add(k, v)
+		resultData.Add(k, v)
 	}
 
-	result := postData(index, SID, dataToSend)
-	return strings.Contains(result, "Test successfully passed")
+	return resultData, nil
 }
 
-func postData(index int, SID *http.Cookie, data url.Values) string {
+func postAnswerForQuestionByIndex(index int, SID *http.Cookie, data url.Values) (bool, error) {
 	req, err := http.NewRequest("POST", TestBaseURL+"/question/"+strconv.Itoa(index), strings.NewReader(data.Encode()))
 	if err != nil {
-		log.Fatalf("got error: %s", err.Error())
+		return false, errors.New(fmt.Sprintf("error while creating post request: %s", err.Error()))
 	}
 	req.AddCookie(SID)
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
 	res, err := client.Do(req)
 	if err != nil {
-		log.Fatalf("error occured. Error is: %s", err.Error())
+		return false, errors.New(fmt.Sprintf("error while doing post request: %s", err.Error()))
 	}
 	defer res.Body.Close()
 
 	htmlBytes, err := io.ReadAll(res.Body)
 	if err != nil {
-		log.Fatalf("error while reading response body: %s", err.Error())
+		return false, errors.New(fmt.Sprintf("error while reading response body: %s", err.Error()))
 	}
 
 	html := string(htmlBytes)
-	fmt.Println(html)
-	return html
+	return strings.Contains(html, "Test successfully passed"), nil
 }
