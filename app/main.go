@@ -5,8 +5,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -33,14 +35,25 @@ func init() {
 func main() {
 	r, err := http.Get(TestBaseURL)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("error while visiting test home page: %s", err.Error())
 	}
 
 	SID := r.Cookies()[0]
-	resolveQuestion(1, SID)
+	solveAllQuestions(SID)
 }
 
-func resolveQuestion(index int, SID *http.Cookie) {
+func solveAllQuestions(SID *http.Cookie) {
+	index := 1
+	for true {
+		isTestCompleted := solveQuestion(index, SID)
+		if isTestCompleted {
+			break
+		}
+		index++
+	}
+}
+
+func solveQuestion(index int, SID *http.Cookie) bool {
 	req, err := http.NewRequest("GET", TestBaseURL+"/question/"+strconv.Itoa(index), nil)
 	if err != nil {
 		log.Fatalf("got error: %s", err.Error())
@@ -101,13 +114,42 @@ func resolveQuestion(index int, SID *http.Cookie) {
 				continue
 			}
 			if currentSelectGroupMaxLength < len(selectResult[i][2]) {
-				currentSelectGroupMaxLengthValue = radioResult[i][2]
+				currentSelectGroupMaxLengthValue = selectResult[i][2]
 				currentSelectGroupMaxLength = len(currentSelectGroupMaxLengthValue)
 			}
 		}
 		postBody[currentSelectGroupName] = currentSelectGroupMaxLengthValue
 	}
 
+	dataToSend := url.Values{}
+	for k, v := range postBody {
+		dataToSend.Add(k, v)
+	}
+
+	result := postData(index, SID, dataToSend)
+	return strings.Contains(result, "Test successfully passed")
+}
+
+func postData(index int, SID *http.Cookie, data url.Values) string {
+	req, err := http.NewRequest("POST", TestBaseURL+"/question/"+strconv.Itoa(index), strings.NewReader(data.Encode()))
+	if err != nil {
+		log.Fatalf("got error: %s", err.Error())
+	}
+	req.AddCookie(SID)
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+
+	res, err := client.Do(req)
+	if err != nil {
+		log.Fatalf("error occured. Error is: %s", err.Error())
+	}
+	defer res.Body.Close()
+
+	htmlBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		log.Fatalf("error while reading response body: %s", err.Error())
+	}
+
+	html := string(htmlBytes)
 	fmt.Println(html)
-	fmt.Println(postBody)
+	return html
 }
